@@ -2,6 +2,7 @@ import json
 import os
 import threading
 from datetime import datetime
+from urllib.parse import urlparse
 from flask import Flask, request, send_file
 from werkzeug.utils import secure_filename
 
@@ -16,6 +17,18 @@ app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///project.db'
 app.config['UPLOAD_DIR'] = os.path.join(app.instance_path, "captures")
 db.init_app(app)
+
+
+@app.after_request
+def allow_flutter_web(response):
+    origin = request.headers.get("Origin")
+    allowed_origin = os.environ.get("FRONTEND_ORIGIN")
+    if origin and (urlparse(origin).hostname in {"localhost", "127.0.0.1"} or origin == allowed_origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        response.headers["Vary"] = "Origin"
+    return response
 
 os.makedirs(app.config['UPLOAD_DIR'], exist_ok=True)
 with app.app_context():
@@ -127,6 +140,24 @@ def delete_item(id):
     db.session.delete(item)
     db.session.commit()
     return {"message": "Item deleted successfully."}, 200
+
+
+@app.route("/item/<int:id>/remove", methods=["POST"])
+def remove_item_from_shelf(id):
+    item = Item.query.get_or_404(id)
+    if item.removed_at is None:
+        item.removed_at = datetime.now()
+        db.session.commit()
+    return item.to_dict(), 200
+
+
+@app.route("/item/<int:id>/restore", methods=["POST"])
+def restore_item_to_shelf(id):
+    item = Item.query.get_or_404(id)
+    if item.removed_at is not None:
+        item.removed_at = None
+        db.session.commit()
+    return item.to_dict(), 200
 
 
 def parse_datetime(value):

@@ -8,6 +8,10 @@ CV_URL=http://localhost:8000 uv run backend.py
 ```
 Runs on port 5000. If `CV_URL` is unset or unreachable, captures are still saved with
 status `cv_unavailable`; re-run them later with `POST /capture/<id>/process`.
+Flutter web on localhost is allowed to call the API. For a web frontend hosted
+elsewhere, set `FRONTEND_ORIGIN` to its exact origin (for example,
+`http://192.168.1.10:8080`). This only configures browser access; item data and
+freshness responses are unchanged.
 
 ## Image pipeline
 The pi uploads to `POST /capture` (multipart: `camera`, `image`, optional `sensors` JSON).
@@ -29,3 +33,6 @@ POST {CV_URL}/analyze   multipart: image=<jpeg>
 - `status`: `safe`, `expiring_soon` (within 1 day), `expired`, or `unknown` (category `Other`, no expires_at)
 - `category`: one of `GET /categories`
 - `POST /item/<id>` accepts `price`, `category`, and `expires_at` (ISO datetime, overrides the category default)
+- `POST /item/<id>/remove` marks an item as no longer in inventory by setting
+  `removed_at`. `POST /item/<id>/restore` clears it for undo. Both return the
+  item and are safe to repeat. Neither records a reason for removal.
