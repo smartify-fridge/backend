@@ -2,7 +2,7 @@ import hashlib
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 from flask import Flask, request, send_file
 from werkzeug.utils import secure_filename
@@ -14,9 +14,10 @@ from extensions import db
 from models.item import Item
 from models.shelf import Shelf
 from models.capture import Capture
+from models.accounting_event import AccountingEvent
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///project.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///project.db')
 app.config['UPLOAD_DIR'] = os.path.join(app.instance_path, "captures")
 app.config['CAPTURE_INTERVAL'] = float(os.environ.get("CAPTURE_INTERVAL", "15")) # seconds between camera polls
 db.init_app(app)
@@ -148,8 +149,24 @@ def delete_item(id):
 @app.route("/item/<int:id>/remove", methods=["POST"])
 def remove_item_from_shelf(id):
     item = Item.query.get_or_404(id)
+    data = request.get_json(silent=True) or {}
+    outcome = data.get("outcome")
+    if outcome is not None and outcome not in {"consumed", "discarded"}:
+        return {"message": "outcome must be consumed or discarded"}, 400
+    if "use_first" in data and not isinstance(data["use_first"], bool):
+        return {"message": "use_first must be a boolean"}, 400
     if item.removed_at is None:
         item.removed_at = datetime.now()
+        if outcome is not None:
+            db.session.add(AccountingEvent(
+                item_id=item.id,
+                name=item.name,
+                category=item.category,
+                stored_at=item.stored_at,
+                price=item.price or 0,
+                outcome=outcome,
+                use_first=outcome == "consumed" and data.get("use_first", False),
+            ))
         db.session.commit()
     return item.to_dict(), 200
 
@@ -159,8 +176,19 @@ def restore_item_to_shelf(id):
     item = Item.query.get_or_404(id)
     if item.removed_at is not None:
         item.removed_at = None
+        event = (AccountingEvent.query.filter_by(item_id=id, voided_at=None)
+                 .order_by(AccountingEvent.id.desc()).first())
+        if event is not None:
+            event.voided_at = datetime.now(timezone.utc)
         db.session.commit()
     return item.to_dict(), 200
+
+
+@app.route("/accounting/events", methods=["GET"])
+def accounting_events():
+    events = (AccountingEvent.query.filter_by(voided_at=None)
+              .order_by(AccountingEvent.occurred_at.desc(), AccountingEvent.id.desc()).all())
+    return {"events": [event.to_dict() for event in events]}
 
 
 def parse_datetime(value):
