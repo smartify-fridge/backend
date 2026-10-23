@@ -1,10 +1,12 @@
-import json
+import hashlib
 import os
 import threading
+import time
 from datetime import datetime
 from flask import Flask, request, send_file
 from werkzeug.utils import secure_filename
 
+import camera_client
 import categories
 import cv_client
 from extensions import db
@@ -15,6 +17,7 @@ from models.capture import Capture
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///project.db'
 app.config['UPLOAD_DIR'] = os.path.join(app.instance_path, "captures")
+app.config['CAPTURE_INTERVAL'] = float(os.environ.get("CAPTURE_INTERVAL", "15")) # seconds between camera polls
 db.init_app(app)
 
 os.makedirs(app.config['UPLOAD_DIR'], exist_ok=True)
@@ -137,34 +140,18 @@ def parse_datetime(value):
 
 @app.route("/capture", methods=["POST"])
 def create_capture():
-    camera = request.form.get("camera")
-    image = request.files.get("image")
-    if not camera or image is None:
-        return {"message": "camera and image are required."}, 400
-
-    timestamp = datetime.now()
-    filename = secure_filename(f"{camera}_{timestamp.strftime('%Y%m%d_%H%M%S_%f')}.jpg")
-    image_path = os.path.join(app.config['UPLOAD_DIR'], filename)
-    image.save(image_path)
-
-    sensors = json.loads(request.form.get("sensors") or "{}")
-    shelf = Shelf.query.filter_by(camera=camera).first()
-    capture = Capture(
-        camera=camera,
-        shelf_id=shelf.id if shelf else None,
-        image_path=image_path,
-        timestamp=timestamp,
-        temperature=sensors.get("temperature"),
-        pressure=sensors.get("pressure"),
-        humidity=sensors.get("humidity"),
-        gas=sensors.get("gas"),
-    )
-    db.session.add(capture)
-    db.session.commit()
-
-    # cv can be slow, so don't make the pi wait on it
-    threading.Thread(target=process_capture, args=(capture.id,), daemon=True).start()
-    return {"message": "Capture received.", "capture_id": capture.id}, 202
+    # pull from the cameras now instead of waiting for the poller, ?camera=cam1 for just one
+    cameras = [request.args["camera"]] if "camera" in request.args else mapped_cameras()
+    captures, errors = {}, {}
+    for camera in cameras:
+        try:
+            capture = poll_camera(camera, force=True)
+        except camera_client.CameraUnavailable as e:
+            errors[camera] = str(e)
+            continue
+        captures[camera] = capture.id
+        start_processing(capture.id)
+    return {"captures": captures, "errors": errors}, 202 if captures else 502
 
 @app.route("/capture/<int:id>", methods=["GET"])
 def capture(id):
@@ -192,6 +179,70 @@ def reprocess_capture(id):
     Capture.query.get_or_404(id)
     process_capture(id)
     return capture(id)
+
+
+def mapped_cameras():
+    return [shelf.camera for shelf in Shelf.query.filter(Shelf.camera.isnot(None))]
+
+
+# sha256 of the last frame pulled from each camera, the esp32 only retakes
+# its frame every 15s so polling can return the same image twice
+last_image_hash = {}
+
+def poll_camera(camera, force=False):
+    """Pull the latest frame and sensor readings from a camera and save them as a
+    Capture. Returns None if the frame hasn't changed since the last poll."""
+    image = camera_client.get_image(camera)
+    digest = hashlib.sha256(image).hexdigest()
+    if not force and last_image_hash.get(camera) == digest:
+        return None
+    last_image_hash[camera] = digest
+    return save_capture(camera, image, camera_client.get_sensors(camera))
+
+
+def save_capture(camera, image, sensors):
+    timestamp = datetime.now()
+    filename = secure_filename(f"{camera}_{timestamp.strftime('%Y%m%d_%H%M%S_%f')}.jpg")
+    image_path = os.path.join(app.config['UPLOAD_DIR'], filename)
+    with open(image_path, "wb") as f:
+        f.write(image)
+
+    shelf = Shelf.query.filter_by(camera=camera).first()
+    capture = Capture(
+        camera=camera,
+        shelf_id=shelf.id if shelf else None,
+        image_path=image_path,
+        timestamp=timestamp,
+        temperature=sensors.get("temperature"),
+        pressure=sensors.get("pressure"),
+        humidity=sensors.get("humidity"),
+        gas=sensors.get("gas"),
+    )
+    db.session.add(capture)
+    db.session.commit()
+    return capture
+
+
+def start_processing(capture_id):
+    # cv can be slow, so don't block the poller or the request on it
+    threading.Thread(target=process_capture, args=(capture_id,), daemon=True).start()
+
+
+def poll_cameras_forever():
+    while True:
+        with app.app_context():
+            for camera in mapped_cameras():
+                try:
+                    capture = poll_camera(camera)
+                except camera_client.CameraUnavailable as e:
+                    app.logger.warning(str(e))
+                    continue
+                except Exception:
+                    app.logger.exception(f"polling {camera} failed")
+                    continue
+                if capture:
+                    start_processing(capture.id)
+        time.sleep(app.config['CAPTURE_INTERVAL'])
 
 
 def process_capture(capture_id):
@@ -260,4 +311,5 @@ def reconcile_shelf(capture, detections):
 
 
 if __name__ == "__main__":
+    threading.Thread(target=poll_cameras_forever, daemon=True).start()
     app.run(host="0.0.0.0", port=5000)
