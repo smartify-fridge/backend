@@ -22,6 +22,8 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:/
 app.config['UPLOAD_DIR'] = os.path.join(app.instance_path, "captures")
 app.config['CAPTURE_INTERVAL'] = float(os.environ.get("CAPTURE_INTERVAL", "15")) # seconds between camera polls
 db.init_app(app)
+# flask leaves app.logger unset outside debug mode, so info logs would be dropped
+app.logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 
 
 @app.after_request
@@ -285,6 +287,7 @@ def save_capture(camera, image, sensors):
 
 def start_processing(capture_id):
     # cv can be slow, so don't block the poller or the request on it
+    app.logger.info("capture %s: saved, starting processing", capture_id)
     threading.Thread(target=process_capture, args=(capture_id,), daemon=True).start()
 
 
@@ -323,22 +326,32 @@ def process_capture(capture_id):
             if shelf is None:
                 capture.status = "failed"
                 capture.error = f"no shelf is mapped to camera {capture.camera}"
+                app.logger.warning("capture %s: %s", capture_id, capture.error)
                 db.session.commit()
                 return
             capture.shelf_id = shelf.id
 
+        app.logger.info("capture %s: sending %s to cv at %s", capture_id, capture.image_path, cv_client.CV_URL)
+        started = time.monotonic()
         try:
             detections = cv_client.analyze(capture.image_path)
         except cv_client.CVUnavailable as e:
             capture.status = "cv_unavailable"
             capture.error = str(e)
+            app.logger.warning("capture %s: cv unavailable: %s", capture_id, e)
             db.session.commit()
             return
         except Exception as e:
             capture.status = "failed"
             capture.error = str(e)
+            app.logger.exception("capture %s: cv analysis failed", capture_id)
             db.session.commit()
             return
+        app.logger.info(
+            "capture %s: cv returned %d items in %.1fs: %s",
+            capture_id, len(detections), time.monotonic() - started,
+            ", ".join(d["name"] for d in detections) or "(none)",
+        )
 
         reconcile_shelf(capture, detections)
         capture.status = "done"
@@ -354,12 +367,14 @@ def reconcile_shelf(capture, detections):
     for item in active:
         unmatched.setdefault(item.name, []).append(item)
 
+    added = []
     for detection in detections:
         name = detection["name"]
         if unmatched.get(name):
             # still on the shelf
             item = unmatched[name].pop(0)
         else:
+            added.append(name)
             # newly added to the shelf
             category = detection.get("category")
             item = Item(
@@ -375,9 +390,16 @@ def reconcile_shelf(capture, detections):
         item.last_seen = capture.timestamp
 
     # anything not seen in this capture was taken off the shelf
+    removed = []
     for items in unmatched.values():
         for item in items:
             item.removed_at = capture.timestamp
+            removed.append(item.name)
+
+    app.logger.info(
+        "capture %s: shelf %s added [%s], removed [%s]",
+        capture.id, capture.shelf_id, ", ".join(added), ", ".join(removed),
+    )
 
 
 if __name__ == "__main__":
