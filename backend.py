@@ -10,6 +10,7 @@ from werkzeug.utils import secure_filename
 import camera_client
 import categories
 import cv_client
+from cv_file_import import import_result_file
 from extensions import db
 from models.item import Item
 from models.shelf import Shelf
@@ -290,7 +291,17 @@ def start_processing(capture_id):
 def poll_cameras_forever():
     while True:
         with app.app_context():
-            for camera in mapped_cameras():
+            results_file = os.environ.get("CV_RESULTS_FILE")
+            if results_file:
+                try:
+                    capture_id = import_result_file(results_file, reconcile_shelf)
+                    if capture_id is not None:
+                        app.logger.info("Imported CV JSON as capture %s", capture_id)
+                except Exception:
+                    db.session.rollback()
+                    app.logger.exception("Could not import CV JSON from %s", results_file)
+            # File mode and camera/HTTP mode are separate inventory sources.
+            for camera in ([] if results_file else mapped_cameras()):
                 try:
                     capture = poll_camera(camera)
                 except camera_client.CameraUnavailable as e:
@@ -371,4 +382,4 @@ def reconcile_shelf(capture, detections):
 
 if __name__ == "__main__":
     threading.Thread(target=poll_cameras_forever, daemon=True).start()
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5001")))

@@ -6,7 +6,7 @@ Flask backend + db for smartify fridge
 uv sync
 CV_URL=http://localhost:8000 uv run backend.py
 ```
-Runs on port 5000. If `CV_URL` is unset or unreachable, captures are still saved with
+Runs on port 5001 (override with `PORT`). If `CV_URL` is unset or unreachable, captures are still saved with
 status `cv_unavailable`; re-run them later with `POST /capture/<id>/process`.
 Data is stored in the local SQLite `instance/project.db` by default. Set
 `DATABASE_URL` to use another SQLAlchemy database URL.
@@ -60,3 +60,50 @@ without creating duplicate events.
 week or month. Each event includes `occurred_at`, the removal date and time
 in ISO 8601 format with a UTC offset (for example,
 `"2026-10-23T18:30:00+00:00"`). Events voided by a restore are excluded.
+
+
+## Read model results from a JSON file (no CV HTTP service)
+
+Run the backend as `python backend.py` (or `uv run backend.py`) with
+`CV_RESULTS_FILE` pointing to the model output. The file must be on the same
+machine or a shared filesystem visible to both processes. For example:
+
+```sh
+CV_RESULTS_FILE=/absolute/shared/cv-result.json uv run backend.py
+```
+
+This enables file mode instead of camera/HTTP polling. Every `CAPTURE_INTERVAL`
+seconds (default 15), the backend checks the file and imports a new `result_id`.
+Missing files are allowed while waiting for the first model result. Invalid files
+are logged and retried without changing inventory. Successfully imported IDs are
+stored in the capture table, so restarting the backend does not replay an old file.
+
+Create a shelf first with `POST /shelf` and use the returned `shelf_id`:
+
+```json
+{
+  "result_id": "a-unique-id-for-this-photo",
+  "shelf_id": 1,
+  "image_path": "/absolute/path/photo.jpg",
+  "items": [
+    {"name": "Milk", "confidence": 0.93},
+    {"name": "Apple", "confidence": 0.87}
+  ]
+}
+```
+
+`image_path`, item `confidence`, and item `category` are optional. The backend
+assigns categories when omitted. Each file is a **full snapshot of one shelf**:
+existing names retain their IDs, prices, and storage dates; new names are added;
+names absent from the snapshot are marked removed. An empty list empties that
+shelf's active inventory. Write results atomically by renaming a completed temporary
+file, as the model's `json_output.py` helper does. Give each new photo a new
+`result_id`, even if its detections match the previous photo.
+
+The Flutter app continues to read `GET /items` and `GET /accounting/events`, then
+opens its existing new-food review page. Name, price, and category edits are saved
+through `POST /item/<id>`. The frontend polls every 15 seconds, so allow up to about
+30 seconds after writing a file for backend import and frontend refresh. Review is
+currently a frontend step; detected items already exist in backend inventory.
+
+Run file-import checks with `python -m unittest test_cv_file_import -v`.
