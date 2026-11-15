@@ -1,5 +1,8 @@
 import os
 import requests
+import dotenv
+
+dotenv.load_dotenv()
 
 # Contract with the cv service:
 #   POST {CV_URL}/analyze   multipart: image=<jpeg>
