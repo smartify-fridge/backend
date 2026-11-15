@@ -357,6 +357,7 @@ def process_capture(capture_id):
         capture.status = "done"
         capture.error = None
         db.session.commit()
+        app.logger.info("capture %s: committed to db", capture_id)
 
 
 def reconcile_shelf(capture, detections):
@@ -367,14 +368,14 @@ def reconcile_shelf(capture, detections):
     for item in active:
         unmatched.setdefault(item.name, []).append(item)
 
-    added = []
+    added, kept = [], []
     for detection in detections:
         name = detection["name"]
         if unmatched.get(name):
             # still on the shelf
             item = unmatched[name].pop(0)
+            kept.append(item)
         else:
-            added.append(name)
             # newly added to the shelf
             category = detection.get("category")
             item = Item(
@@ -384,6 +385,7 @@ def reconcile_shelf(capture, detections):
                 stored_at=capture.timestamp,
             )
             db.session.add(item)
+            added.append(item)
         item.image = capture.image_path
         item.confidence = detection.get("confidence")
         item.capture_id = capture.id
@@ -394,12 +396,20 @@ def reconcile_shelf(capture, detections):
     for items in unmatched.values():
         for item in items:
             item.removed_at = capture.timestamp
-            removed.append(item.name)
+            removed.append(item)
 
+    # flush so new items have ids to log, the caller still owns the commit
+    db.session.flush()
     app.logger.info(
-        "capture %s: shelf %s added [%s], removed [%s]",
-        capture.id, capture.shelf_id, ", ".join(added), ", ".join(removed),
+        "capture %s: shelf %s added %d, kept %d, removed %d",
+        capture.id, capture.shelf_id, len(added), len(kept), len(removed),
     )
+    for label, items in (("added", added), ("kept", kept), ("removed", removed)):
+        for item in items:
+            app.logger.info(
+                "capture %s:   %s item %s: name=%r category=%s confidence=%s",
+                capture.id, label, item.id, item.name, item.category, item.confidence,
+            )
 
 
 if __name__ == "__main__":

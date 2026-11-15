@@ -8,7 +8,7 @@ dotenv.load_dotenv()
 #   POST {CV_URL}/analyze   multipart: image=<jpeg>
 #   -> 200 {"items": [{"name": "milk", "confidence": 0.93, "category": "Dairy"}, ...]}  # category optional
 CV_URL = os.environ.get("CV_URL")
-CV_TIMEOUT = float(os.environ.get("CV_TIMEOUT", "30"))
+CV_TIMEOUT = float(os.environ.get("CV_TIMEOUT", "300"))
 
 
 class CVUnavailable(Exception):
