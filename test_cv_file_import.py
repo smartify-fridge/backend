@@ -47,6 +47,20 @@ class CVFileImportTest(unittest.TestCase):
         with self.app.app_context():
             return import_result_file(self.path, self.backend.reconcile_shelf)
 
+    def test_photo_url_and_missing_file(self):
+        photo = Path(self.directory.name) / 'photo.jpg'
+        photo.write_bytes(b'example-jpeg')
+        self.write([{'name': 'Milk'}], image_path=str(photo))
+        capture_id = self.ingest()
+        food = self.client.get('/items').json['items'][0]
+        self.assertEqual(food['image_url'], f'capture/{capture_id}/image')
+        response = self.client.get('/' + food['image_url'])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b'example-jpeg')
+        response.close()
+        photo.unlink()
+        self.assertEqual(self.client.get('/' + food['image_url']).status_code, 404)
+
     def test_file_to_inventory_and_price_edit_persists_across_new_results(self):
         self.write([{'name': 'Milk', 'confidence': 0.91}])
         self.assertIsNotNone(self.ingest())

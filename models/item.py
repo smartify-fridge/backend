@@ -60,6 +60,7 @@ class Item(db.Model):
             "expires_at": iso(self.expires_at),
             "shelf_id": self.shelf_id,
             "image": self.image,
+            "image_url": f"capture/{self.capture_id}/image" if self.capture_id and self.image else None,
             "confidence": self.confidence,
             "last_seen": iso(self.last_seen),
             "removed_at": iso(self.removed_at),

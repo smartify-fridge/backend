@@ -4,7 +4,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
-from flask import Flask, request, send_file
+from flask import Flask, request, send_file, abort
 from werkzeug.utils import secure_filename
 
 import camera_client
@@ -233,7 +233,9 @@ def capture(id):
 @app.route("/capture/<int:id>/image", methods=["GET"])
 def capture_image(id):
     capture = Capture.query.get_or_404(id)
-    return send_file(capture.image_path, mimetype="image/jpeg")
+    if not capture.image_path or not os.path.isfile(capture.image_path):
+        abort(404, description="Capture photo unavailable")
+    return send_file(os.path.abspath(capture.image_path), mimetype="image/jpeg")
 
 @app.route("/capture/<int:id>/process", methods=["POST"])
 def reprocess_capture(id):
